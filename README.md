@@ -1,34 +1,23 @@
-# Dragonas IDV/USFQ — Dashboard y simulador · Versión 5
+# DRAGONAS | Panel de bienestar y fatiga de la próxima sesión
 
-Demo académica en Streamlit. **No es un modelo entrenado o validado.** Los resultados son artificiales y no deben usarse para decisiones de participación, fatiga o atención médica.
+Interfaz de apariencia final con **datos 100 % sintéticos** para 2026. Modelo de regresión lineal ajustado sobre etiquetas sintéticas, no sobre datos del club. La clasificación de fatiga también es provisional. No se debe utilizar para selección de jugadoras ni decisiones clínicas.
 
-## Navegación
+## Qué hace
 
-- **Inicio · Dashboard**: objetivo, resumen de cobertura por las cuatro fuentes y simulaciones recientes.
-- **Simulador**: cuatro descargas independientes para actualizaciones por fuente, selección de jugadora y fecha, simulación ficticia y descarga del resultado CSV.
-- **Registro de simulaciones**: filtros, historial y exportación CSV.
+- **Inicio**: dashboard de 24 jugadoras con nombres ficticios, estado por jugadora, carga semanal, fatiga proyectada y exportación del historial sintético.
+- **Simulador**: ingresar **una o cualquier cantidad de filas** en una tabla editable, o descargar/subir un Excel con 1 o 10 filas; pulsar **Predecir próxima sesión** y obtener una predicción individual de bienestar y fatiga para cada fila. Descargar resultados en `.xlsx`.
+- **Registro de simulaciones**: filtrar y descargar el historial generado durante la sesión del navegador.
 
-## Plantillas independientes
+Las fechas son por fila: `Fecha` (datos de hoy) y `Fecha_proxima_sesion` (si se omite se usa el día siguiente como supuesto, no el calendario real de entrenamientos). Si se deja un campo sin medir se completa mediante la mediana o la moda de registros históricos previos de esa jugadora; si no existen, se usa el equipo. Si se informa RPE y duración pero no carga, se calcula `RPE × duración`.
 
-La carpeta `plantillas/` contiene:
+El motor numérico está en `src/forecast.py`: intercepto, coeficientes estimados con mínimos cuadrados sintéticos y ecuación de regresión explícita. Las categorías de fatiga se asignan mediante un puntaje provisional. No se afirma que el algoritmo esté entrenado o validado con datos reales.
 
-| Fuente mostrada | Archivo | Hoja de captura | Campos |
-| --- | --- | --- | --- |
-| GPS | `Plantilla_GPS.xlsx` | `GPS` | Distancias, velocidades, sprints y aceleraciones |
-| Wellness y Carga | `Plantilla_Wellness_y_Carga.xlsx` | `WELLNESS_CARGA` | Cuestionario, peso, RPE, duración y carga |
-| Biomecánicos | `Plantilla_Biomecanicos.xlsx` | `BIOMECANICOS` | Fuerza, torque, CMJ y RSI |
-| Laboratorio | `Plantilla_Laboratorio.xlsx` | `LABORATORIO` | Hemoglobina, hematocrito, ferritina, cortisol, testosterona y CPK |
+`data/historial_ficticio_2026.csv` permite que el dashboard cargue inmediatamente. `data/Dragonas_Datos_Ficticios_2026.xlsx` contiene las hojas `HISTORIAL_2026`, `GPS_2026`, `BIOMECANICOS_2026`, `LABORATORIO_2026`, `REGISTROS_HOY` y `METODOLOGIA`. Contiene **2112** registros diarios y **24** nombres inventados. Valores faltantes artificiales completados por medianas/modas de cada jugadora.
 
-Cada archivo tiene una hoja de captura (primera) y otra de instrucciones. **Fecha** y **Nombre_jugadora** identifican provisionalmente cada observación. **No se solicita ID de jugadora**. Los nombres deben escribirse igual en todas las fuentes. Si hay homónimas, deben resolverse antes de importar.
+`plantillas/Plantilla_1_jugadora.xlsx` y `plantillas/Plantilla_10_jugadoras.xlsx` sirven para probar ambas cargas. `plantillas/` también conserva las cuatro plantillas independientes por fuente.
 
-**Regla de actualización incremental**: si no se carga un archivo para una fuente, **NO se modifica esa fuente**. Las celdas vacías no borran valores previos ni se interpretan como ceros. Los registros de distintas fuentes se unen por `(Nombre_jugadora, Fecha)` cuando corresponden a la misma tabla. Las mediciones periódicas conservan su fecha original. El importador (`read_source_updates`) revisa encabezados, categorías, formatos, duplicados y conflictos; `apply_source_updates` aplica el lote de manera transaccional, sin sobrescribir un valor histórico incompatible.
+## Uso y despliegue
 
-El formato antiguo con ID solo se conserva como compatibilidad interna; **la interfaz y las cuatro plantillas nuevas no lo solicitan**. La identificación definitiva se diseñará más adelante.
+Subir **el contenido** del ZIP a la raíz de GitHub, conservando `app.py`, `requirements.txt`, `src/forecast.py`, `data/`, `plantillas/` y `.streamlit/config.toml`. El repositorio puede mantener archivos antiguos que ya no se importan. En Streamlit Community Cloud: branch `main`, archivo principal `app.py`.
 
-## Seguridad y despliegue
-
-**La demo pública NO permite importar Excel**. Puede mostrar y descargar las cuatro plantillas vacías. No debe alojar datos reales, nombres ni archivos médicos. En `app.py`, `PRIVATE=False` es intencional: no lo cambies a `True` para usar el entorno público. La activación de subida real requiere antes una instalación privada con autenticación, autorización institucional, base de datos protegida y persistente y controles de acceso. El SQLite de Streamlit Community Cloud es efímero y no es apto como repositorio clínico.
-
-Para actualizar GitHub, descomprimir y subir en la raíz del repositorio `app.py`, `README.md`, `requirements.txt`, la carpeta **`src/` completa** y la carpeta **`plantillas/` completa**. Conservar la estructura de directorios. La carpeta `.streamlit/`, si se sube, es opcional.
-
-Para pruebas del código de importación, los cuatro archivos de entrada pueden procesarse a la vez o en distintos momentos. Si ninguno se proporciona, no se modifica ningún registro. Los archivos vacíos tampoco cambian el historial.
+**Seguridad:** Esta instancia pública admite solo los 24 nombres ficticios definidos en el CSV. La carga de Excel y la edición se limitan a ese plantel sintético; nunca introducir datos identificables o clínicos reales. Los registros editados se guardan solo en `st.session_state` y se pierden al reiniciar la sesión del navegador. La versión médica real requiere autenticación, almacenamiento cifrado/autorizado y modelos validados.

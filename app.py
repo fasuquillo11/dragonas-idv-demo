@@ -1,342 +1,357 @@
-"""Dragonas IDV/USFQ: dashboard + simulador + registro.
+"""DRAGONAS | Panel de proyección de la próxima sesión.
 
-Solo demostración con datos sintéticos. NO es un modelo ML entrenado ni validado.
-Nunca cargar información identificable en esta instancia pública.
+Interfaz con apariencia de producto final, alimentada exclusivamente por
+información SINTÉTICA. No utiliza datos ni nombres reales del equipo.
+La regresión de bienestar se estimó sobre etiquetas sintéticas: NO VALIDADA.
 """
 from __future__ import annotations
+from datetime import date,timedelta
+from io import BytesIO
 from pathlib import Path
+from hashlib import sha256
 import pandas as pd
 import streamlit as st
 
-from src.demo_data import make_demo_records
-from src.export_results import export_csv, result_to_row
-from src.feature_builder import snapshot
-from src.mock_model import demo_predict
-from src.storage import (initialize, load_players, get_rows, save_players,
-                         save_rows, save_simulation, load_simulations, apply_source_updates)
-from src.template_spec import SOURCE_FIELDS, UPDATE_SOURCES
-from src.workbook_io import read_source_updates, find_existing_conflicts
+from src.forecast import (
+    COL, CAT_CODES, NUMERIC, DAILY_COLUMNS, OLS_INTERCEPT,
+    OLS_COEFFICIENTS, roster, compute_forecast, forecast_latest,
+)
 
-ROOT = Path(__file__).resolve().parent
-TEMPLATE_DIR = ROOT / 'plantillas'
-PRIVATE = False  # Versión pública: nunca habilitar carga de información real.
+BASE=Path(__file__).resolve().parent
+ASSETS=BASE/'data'
+TEMPLATES=BASE/'plantillas'
+st.set_page_config(
+    page_title='Dragonas | Panel de rendimiento',
+    page_icon='🐉',layout='wide',initial_sidebar_state='collapsed')
 
-st.set_page_config(page_title='Dragonas IDV/USFQ | Panel de rendimiento', page_icon='🐉', layout='wide')
 st.markdown('''
 <style>
-:root{--navy:#15243e;--magenta:#bd2d71;--muted:#657188}
-.block-container{max-width:1330px;padding-top:1.45rem;padding-bottom:3rem}
-[data-testid="stAppViewContainer"]{background:#f8f9fc}
-[data-testid="stSidebar"]{background:#15243e}
-[data-testid="stSidebar"] *{color:#f5f7fc!important}
-[data-testid="stMetric"]{background:#fff;padding:18px 20px;border:1px solid #e7eaf0;border-radius:15px;box-shadow:0 2px 10px rgba(21,36,62,.025)}
-[data-testid="stMetricLabel"]{color:#64748b}
-[data-testid="stMetricValue"]{color:#17243e}
-h1,h2,h3{letter-spacing:-.025em;color:#15243e}
-h1{font-weight:780!important}
-div.stButton>button[kind="primary"],div.stDownloadButton>button[kind="primary"]{background:#bd2d71;border-color:#bd2d71;color:white;border-radius:10px}
-div.stButton>button,div.stDownloadButton>button{border-radius:10px}
-.hero{padding:26px 30px;border-radius:18px;background:linear-gradient(115deg,#15243e,#283a5f);color:white;margin-bottom:18px}
-.hero .overline{font-size:12px;color:#efbfd7;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
-.hero h2{color:white!important;font-size:27px;margin:7px 0 11px}
-.hero p{font-size:15px;color:#e1e8f2;margin:0;max-width:820px;line-height:1.6}
-.section-label{font-weight:750;color:#263852;font-size:17px;margin:16px 0 8px}
-.soft-note{background:#fff3f8;color:#772249;border:1px solid #f0d5e2;padding:11px 15px;border-radius:11px;font-size:13px;margin:12px 0}
-.small-muted{color:#6e7890;font-size:13px}
-hr{border-color:#e9ecf2}
+:root{--navy:#15243e;--magenta:#c13578;--muted:#69758c;--line:#e9edf4}
+.stApp{background:#f7f8fc;color:#1e2a40}
+.block-container{max-width:1450px;padding-top:1.25rem;padding-bottom:3.6rem}
+[data-testid="stMetric"]{background:white;border:1px solid #e6eaf2;border-radius:16px;padding:16px 18px;box-shadow:0 4px 16px rgba(15,33,59,.025)}
+[data-testid="stMetricLabel"]{color:#5f7089;font-size:14px}
+[data-testid="stMetricValue"]{color:#182943;font-weight:730}
+[data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"]){border-radius:17px}
+div.stButton>button[kind="primary"],div.stDownloadButton>button[kind="primary"]{border-radius:11px;background:#c13578;border-color:#c13578;color:white;font-weight:650}
+div.stButton>button,div.stDownloadButton>button{border-radius:11px}
+h1,h2,h3{letter-spacing:-.02em;color:#1a2a44}
+header{background:transparent!important}
+.hero{background:linear-gradient(107deg,#172844 0%,#273858 67%,#4a345b 100%);border-radius:19px;padding:30px 34px;margin:7px 0 24px;color:#f9fbff}
+.hero h1{color:white;font-size:31px;margin:9px 0;line-height:1.16}
+.hero p{color:#dce5f0;max-width:970px;line-height:1.64;margin:0;font-size:15px}
+.eyebrow{color:#f8bdd8;letter-spacing:.11em;font-size:12px;font-weight:750;text-transform:uppercase}
+.page-subtitle{color:#61718a;font-size:14px;margin:-10px 0 17px}
+.footnote{font-size:12px;color:#8190a4;margin-top:25px;padding:13px 4px 5px;border-top:1px solid #e4e8f0}
+[data-testid="stDataFrame"], [data-testid="stDataEditor"]{border-radius:12px;overflow:hidden}
 </style>
-''', unsafe_allow_html=True)
+''',unsafe_allow_html=True)
 
-initialize()
-players = load_players()
-daily = get_rows('diario')
-periodic = get_rows('evaluaciones')
-sims = load_simulations()
-name_by_id = {p['jugadora_id']: p['nombre'] for p in players}
+@st.cache_data(show_spinner=False)
+def load_history():
+    return pd.read_csv(ASSETS/'historial_ficticio_2026.csv',sep=';',encoding='utf-8-sig')
 
+@st.cache_data(show_spinner=False)
+def excel_bytes(df:pd.DataFrame, sheet='RESULTADOS'):
+    out=BytesIO()
+    with pd.ExcelWriter(out,engine='openpyxl',datetime_format='yyyy-mm-dd') as writer:
+        df.to_excel(writer,sheet_name=sheet,index=False)
+        sh=writer.book[sheet]
+        sh.freeze_panes='A2'
+        for cell in sh[1]:
+            cell.font=__import__('openpyxl').styles.Font(bold=True,color='FFFFFF')
+            cell.fill=__import__('openpyxl').styles.PatternFill('solid',fgColor='15243E')
+        for column in sh.columns:
+            letter=column[0].column_letter
+            sh.column_dimensions[letter].width=min(38,max(16,max(len(str(c.value or '')) for c in list(column)[:250])+3))
+    return out.getvalue()
 
-def player_label(pid):
-    return name_by_id.get(pid, 'Jugadora ficticia')
-
-
-def seed_demo():
-    records = make_demo_records()
-    ids = sorted({r['jugadora_id'] for r in records})
-    save_players([{'jugadora_id': p, 'nombre': f'Jugadora ficticia {p[-2:]}', 'posicion': None} for p in ids])
-    save_rows('diario', records)
-    measures = []
-    for p in ids:
-        measures.extend([
-            {'jugadora_id': p, 'Fecha': '2026-09-08',
-             'CMJ Altura de Salto por Impulso Momento (cm)': 32.2,
-             'Nordic Fuerza Promedio Izquierda (N)': 290.0,
-             'Nordic Fuerza Promedio Derecha (N)': 300.0},
-            {'jugadora_id': p, 'Fecha': '2026-09-22',
-             'Hemoglobina (g/dL)': 13.2, 'Ferritina': 32.0},
-        ])
-    save_rows('evaluaciones', measures)
-
-
-def saved_simulation_rows():
-    rows = []
-    for record in sims:
-        obj = dict(record)
-        obj['Jugadora'] = name_by_id.get(obj['jugadora_id'], 'Nombre no disponible')
-        rows.append(obj)
-    return rows
+@st.cache_data(show_spinner=False)
+def read_uploaded_excel(content:bytes)->pd.DataFrame:
+    try:
+        df=pd.read_excel(BytesIO(content),sheet_name='REGISTROS_HOY',skiprows=3,engine='openpyxl')
+    except Exception as exc:
+        raise ValueError('El Excel debe tener la hoja REGISTROS_HOY de la plantilla oficial.') from exc
+    df.columns=[str(c).strip() for c in df.columns]
+    required=[COL['fecha'],COL['nombre']]
+    missing=[f for f in required if f not in df.columns]
+    if missing:raise ValueError('Faltan columnas: '+', '.join(missing))
+    df=df.dropna(how='all').reset_index(drop=True)
+    if len(df)>300:raise ValueError('La carga admite un máximo de 300 filas por operación.')
+    for c in DAILY_COLUMNS:
+        if c not in df.columns:df[c]=None
+    return df[DAILY_COLUMNS]
 
 
-with st.sidebar:
-    st.markdown('## 🐉 DRAGONAS')
-    st.caption('IDV / USFQ  ·  Performance Analytics')
-    st.divider()
-    st.markdown('**Prototipo académico**')
-    st.caption('Predicción de bienestar y clasificación anticipada de fatiga para el día siguiente.')
-    st.info('Versión DEMO: datos ficticios y reglas simuladas. Sin modelos entrenados.')
-    st.divider()
-    st.caption('Las decisiones deportivas y clínicas requieren evaluación profesional.')
+def fresh_row(name=None,day=None):
+    return {
+        COL['fecha']:(day or date.today()).isoformat(),
+        COL['prox']:((day or date.today())+timedelta(days=1)).isoformat(),
+        COL['nombre']:name or available_players[0],
+        COL['feel']:'Normal',COL['sleep']:'Bueno',
+        COL['stress']:'Bajo', COL['fatigue']:'Normal',
+        COL['soreness']:'Bajo',COL['hydration']:'Hidratada',
+        COL['rpe']:5.0,COL['minutes']:75.0,COL['load']:375.0,
+    }
 
-head_l, head_r = st.columns([4, 1])
-with head_l:
-    st.markdown('### Plataforma de monitoreo del bienestar y la fatiga')
-with head_r:
-    st.caption('● DEMOSTRACIÓN PÚBLICA')
-view = st.radio('Navegación principal',
-                ['Inicio · Dashboard', 'Simulador', 'Registro de simulaciones'],
-                horizontal=True, label_visibility='collapsed')
+
+def ensure_session():
+    if 'hist' not in st.session_state:
+        st.session_state.hist=load_history().copy()
+    if 'register' not in st.session_state:
+        st.session_state.register=[]
+    if 'active_results' not in st.session_state:
+        st.session_state.active_results=[]
+    if 'editor_seed' not in st.session_state:
+        st.session_state.editor_seed=pd.DataFrame([fresh_row()])[DAILY_COLUMNS]
+    if 'editor_version' not in st.session_state:
+        st.session_state.editor_version=0
+    if 'last_upload_hash' not in st.session_state:
+        st.session_state.last_upload_hash=None
+
+
+def latest_dates_table(history):
+    result=history.sort_values(COL['fecha']).drop_duplicates(COL['nombre'],keep='last')
+    return result[[COL['nombre'],COL['fecha'],COL['rpe'],COL['load'],COL['fatigue']]].rename(columns={
+        COL['nombre']:'Jugadora',COL['fecha']:'Última medición',COL['rpe']:'RPE',
+        COL['load']:'Carga',COL['fatigue']:'Fatiga reportada'})
+
+
+def update_editor(rows:pd.DataFrame):
+    st.session_state.editor_seed=rows[DAILY_COLUMNS].reset_index(drop=True).copy()
+    st.session_state.editor_version+=1
+
+
+def run_batch(frame:pd.DataFrame):
+    if len(frame)==0:raise ValueError('Agrega al menos una fila antes de predecir.')
+    # Validación de todas las filas antes de guardar cualquier cosa.
+    history=st.session_state.hist.copy()
+    results=[]
+    keys=set()
+    for i, r in frame.iterrows():
+        data=r.to_dict()
+        name=str(data.get(COL['nombre'],'')).strip()
+        day=pd.to_datetime(data.get(COL['fecha']),errors='coerce')
+        if pd.isna(day): raise ValueError(f'Fila {i+1}: ingresa una fecha válida.')
+        unique=(name,day.date())
+        if unique in keys:raise ValueError(f'Hay más de una fila para {name} en {day.date()}.')
+        keys.add(unique)
+        try:
+            result,completed=compute_forecast(data,history)
+        except (ValueError,KeyError,TypeError) as exc:
+            raise ValueError(f'Fila {i+1}: {exc}') from exc
+        results.append(result)
+        new_row=pd.DataFrame([completed])
+        history=pd.concat([history,new_row],ignore_index=True)
+        history=history.drop_duplicates([COL['nombre'],COL['fecha']],keep='last')
+    # Todo válido: guardar al historial de la sesión y en el registro.
+    st.session_state.hist=history
+    st.session_state.active_results=results
+    st.session_state.register.extend(results)
+    return pd.DataFrame(results)
+
+
+def source_download_buttons():
+    sources=[('GPS','Plantilla_GPS.xlsx'),('Wellness y Carga','Plantilla_Wellness_y_Carga.xlsx'),
+             ('Biomecánicos','Plantilla_Biomecanicos.xlsx'),('Laboratorio','Plantilla_Laboratorio.xlsx')]
+    cols=st.columns(4)
+    for col,(label,fname) in zip(cols,sources):
+        with col:
+            st.download_button(f'⬇ {label}',data=(TEMPLATES/fname).read_bytes(),
+                file_name=fname,
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                use_container_width=True,key=f'src_{fname}')
+
+
+# Estado de la aplicación solo en el navegador (sin almacenar información real)
+available_players=roster(load_history())
+ensure_session()
+history=st.session_state.hist
+current=date.today()
+
+brand,version=st.columns([4,1],vertical_alignment='center')
+with brand:
+    st.markdown('### 🐉 DRAGONAS  <span style="color:#b83b79;font-weight:600;font-size:.75em">| IDV · USFQ</span>',unsafe_allow_html=True)
+with version:
+    st.caption('PANEL DE RENDIMIENTO')
+page=st.radio('Secciones',['Inicio','Simulador','Registro de simulaciones'],
+              horizontal=True,label_visibility='collapsed')
 st.divider()
 
-if view == 'Inicio · Dashboard':
-    st.markdown('''<div class="hero"><div class="overline">Dragonas IDV/USFQ · Proyecto de investigación</div>
-    <h2>Del registro diario a una visión del día siguiente</h2>
-    <p>Esta herramienta busca apoyar el monitoreo de las jugadoras mediante la predicción del bienestar y la
-    clasificación anticipada de la fatiga a partir de mediciones actuales e históricas. En esta versión,
-    los resultados de predicción son simulaciones ficticias, no salidas de modelos entrenados.</p></div>''',
-    unsafe_allow_html=True)
-    if not players:
-        st.info('La demostración aún no tiene registros sintéticos. Carga los datos de ejemplo para explorar el dashboard.')
-        if st.button('Cargar datos ficticios de demostración', type='primary'):
-            seed_demo()
-            st.rerun()
+if page=='Inicio':
+    st.markdown('''<div class="hero"><div class="eyebrow">Rendimiento deportivo · Bienestar y fatiga</div>
+    <h1>Anticipa la próxima sesión</h1>
+    <p>Visualiza el estado de tus jugadoras, incorpora las mediciones de la sesión actual y
+    consulta una proyección de bienestar y fatiga para la siguiente. Todo desde un único panel.</p></div>''',unsafe_allow_html=True)
+    next_day=st.date_input('Fecha de la próxima sesión',value=max(current, date(2026,11,10)),
+                           help='Se utiliza como fecha objetivo del dashboard; la predicción usa la última observación disponible.')
+    projected=forecast_latest(history,next_day)
+    if projected.empty:
+        st.info('No hay datos disponibles para la fecha indicada.')
     else:
-        observed_dates = sorted({r['Fecha'] for r in daily}, reverse=True)
-        a, b = st.columns([3, 1])
-        with a:
-            st.markdown('#### Dashboard de cobertura del equipo')
-            st.caption('Muestra disponibilidad de información, no estimaciones clínicas ni disponibilidad competitiva.')
-        with b:
-            day = st.selectbox('Fecha de referencia', observed_dates)
-        st.caption(f'{len(players)} jugadoras registradas. Cada fuente se presenta según la información disponible a la fecha elegida.')
-        st.markdown('#### Disponibilidad por fuente')
-        left, right = st.columns([1.05, 1], gap='large')
-        source_rows = []
-        table_rows = []
-        source_counts = {key: 0 for key in UPDATE_SOURCES}
-        for p in players:
-            snap = snapshot(p['jugadora_id'], day, daily, periodic)
-            values = snap['valores']
-            state = {key: any(values.get(f) is not None for f in spec['fields'])
-                     for key, spec in UPDATE_SOURCES.items()}
-            for key in source_counts:
-                source_counts[key] += int(state[key])
-            table_rows.append({'Jugadora': p['nombre'],
-                               **{spec['label']: 'Sí' if state[key] else 'Sin dato disponible'
-                                  for key, spec in UPDATE_SOURCES.items()}})
-        summary = st.columns(4)
-        for idx, (key, spec) in enumerate(UPDATE_SOURCES.items()):
-            summary[idx].metric(spec['label'], f'{source_counts[key]} / {len(players)}')
-            source_rows.append({'Fuente': spec['label'], 'Jugadoras con información': source_counts[key]})
-        st.caption('GPS y Wellness y Carga: registros del día. Biomecánicos y Laboratorio: última medición previa vigente según reglas DEMO.')
+        num=len(projected)
+        avg=projected['Bienestar previsto'].mean()
+        high=int((projected['Fatiga prevista']=='ALTA').sum())
+        cols=st.columns(4)
+        cols[0].metric('Jugadoras monitoreadas',num)
+        cols[1].metric('Registros de 2026',len(history))
+        cols[2].metric('Bienestar previsto · promedio',f'{avg:.1f} / 100')
+        cols[3].metric('Fatiga alta · próxima sesión',high)
+        st.markdown('#### Resumen del equipo')
+        left,right=st.columns([1.0,1.12],gap='large')
         with left:
-            st.markdown('**Jugadoras con información disponible**')
-            st.bar_chart(pd.DataFrame(source_rows).set_index('Fuente'), height=270)
-        with right:
-            st.markdown('**Vista rápida por jugadora**')
-            st.dataframe(pd.DataFrame(table_rows), hide_index=True, use_container_width=True, height=300)
-        st.caption('Laboratorio y Biomecánicos usan mediciones previas dentro de una vigencia provisional de 90 y 60 días respectivamente. Estos límites aún deben validarse.')
-
-        st.markdown('#### Resultados guardados de demostración')
-        if sims:
-            charts_left, charts_right = st.columns(2, gap='large')
-            data = pd.DataFrame(saved_simulation_rows())
-            with charts_left:
-                st.markdown('**Clasificación de fatiga simulada**')
-                counts = data['Fatiga DEMO'].value_counts().reindex(['BAJA', 'MODERADA', 'ALTA'], fill_value=0)
-                st.bar_chart(counts.rename('Simulaciones'), height=230)
-            with charts_right:
-                st.markdown('**Últimos resultados**')
-                st.dataframe(data[['Jugadora', 'Fecha objetivo', 'Bienestar DEMO', 'Fatiga DEMO']].head(8),
-                             hide_index=True, use_container_width=True, height=245)
-            st.caption('Los resultados son ficticios, dependen de reglas arbitrarias y no deben utilizarse para tomar decisiones.')
-        else:
-            st.info('Aún no se han guardado simulaciones. Entra a «Simulador» para generar un resultado de ejemplo.')
-
-elif view == 'Simulador':
-    st.title('Simulador de bienestar y fatiga')
-    st.caption('Flujo propuesto: preparar el Excel por fuente → cargar información en la futura versión privada → seleccionar jugadora y fecha → simular → descargar resultado.')
-    with st.container(border=True):
-        st.markdown('#### 1. Actualizar datos por fuente')
-        st.write('Descarga **solo la plantilla de la fuente** que tenga nuevos registros. No es necesario volver a subir las demás.')
-        st.caption('Cada archivo tiene una única hoja de captura con los encabezados correspondientes. El sistema relaciona los datos por Nombre_jugadora y Fecha, de manera provisional.')
-        uploads = {}
-        for key, spec in UPDATE_SOURCES.items():
             with st.container(border=True):
-                info, download, upload = st.columns([1.55, 1.15, 2.1], gap='medium', vertical_alignment='center')
-                with info:
-                    st.markdown(f'**{spec["label"]}**')
-                    st.caption(spec['description'])
-                with download:
-                    filename = spec['filename']
-                    st.download_button('⬇ Descargar plantilla', data=(TEMPLATE_DIR / filename).read_bytes(),
-                                       file_name=filename,
-                                       mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                                       key=f'descargar_{key}', use_container_width=True)
-                with upload:
-                    attached = st.file_uploader(f'Archivo actualizado: {spec["label"]}',
-                                                type=['xlsx'], key=f'actualizar_{key}',
-                                                disabled=not PRIVATE,
-                                                help='Si no cargas ningún archivo, esta fuente se conserva sin modificaciones.')
-                    if attached is None:
-                        st.caption('Sin archivo nuevo · sin cambios en esta fuente.')
-                    else:
-                        uploads[key] = (attached.name, attached.getvalue())
-                        st.caption('Archivo seleccionado · pendiente de validación y guardado.')
-        st.info('**Regla de actualización:** una plantilla no subida significa que no hay datos nuevos para esa fuente. El historial se mantiene; las celdas vacías no borran datos anteriores.')
-        st.caption('Por ahora el nombre identifica provisionalmente cada jugadora. Nombres iguales o inconsistentes requieren revisión manual; los ID se definirán más adelante.')
-        with st.expander('Instrucciones para copiar y pegar datos'):
-            st.markdown('''1. Descarga la plantilla de la fuente que vas a actualizar.
-2. Copia las filas desde el registro original debajo de los encabezados. Completa **Fecha** y **Nombre_jugadora** en cada fila.
-3. Escribe el mismo nombre en todas las fuentes, con una ortografía consistente. Por ahora no se necesita un ID.
-4. Deja en blanco los valores que no se midieron. No conviertas ausencias en ceros ni repitas mediciones previas.
-5. En la futura versión privada, sube únicamente las plantillas nuevas y confirma la actualización.
+                st.markdown('**Fatiga prevista por categoría**')
+                fat_counts=projected['Fatiga prevista'].value_counts().reindex(['BAJA','MODERADA','ALTA'],fill_value=0)
+                chart=pd.DataFrame({'Jugadoras':fat_counts})
+                st.bar_chart(chart,height=260)
+            with st.container(border=True):
+                st.markdown('**Evolución semanal de carga**')
+                last=history.copy()
+                last['Semana']=pd.to_datetime(last[COL['fecha']],errors='coerce')
+                last=last.dropna(subset=['Semana'])
+                last=last[last['Semana']<=pd.Timestamp(next_day)]
+                weekly=(last.groupby(pd.Grouper(key='Semana',freq='W'))[COL['load']]
+                        .mean().tail(12).rename('Carga media'))
+                st.line_chart(weekly,height=245)
+        with right:
+            with st.container(border=True):
+                st.markdown('**Proyección individual · próxima sesión**')
+                st.caption(f'Fecha objetivo: {next_day:%d/%m/%Y}')
+                table=projected[['Jugadora','Bienestar previsto','Fatiga prevista','Fecha de registro']].copy()
+                st.dataframe(table,hide_index=True,use_container_width=True,height=345,
+                             column_config={'Bienestar previsto':st.column_config.ProgressColumn('Bienestar previsto',min_value=0,max_value=100,format='%.1f')})
+                st.download_button('⬇ Descargar proyección del equipo',
+                    data=excel_bytes(projected,'PROYECCION'),
+                    file_name=f'proyeccion_dragonas_{next_day}.xlsx',
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    use_container_width=True)
+            with st.container(border=True):
+                st.markdown('**Actividad reciente**')
+                st.dataframe(latest_dates_table(history).head(6),hide_index=True,
+                             use_container_width=True,height=238)
+    st.divider()
+    col_1,col_2=st.columns([3,1],vertical_alignment='center')
+    with col_1:
+        st.markdown('**Historial de referencia · 2026**')
+        st.caption('Incluye jugadoras ficticias y mediciones de Wellness, carga, GPS, biomecánica y laboratorio.')
+    with col_2:
+        st.download_button('⬇ Descargar historial 2026',
+          data=(ASSETS/'Dragonas_Datos_Ficticios_2026.xlsx').read_bytes(),
+          file_name='Dragonas_Datos_Ficticios_2026.xlsx',
+          mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          use_container_width=True)
 
-Una jugadora puede aparecer en GPS y en Wellness y Carga en la misma fecha: las variables se complementan, no se crean dos registros diarios. Los registros de Biomecánicos y Laboratorio conservan su **fecha real de medición**.''')
-        if not PRIVATE:
-            st.warning('**Demostración pública:** puedes descargar las cuatro plantillas, pero la carga de archivos está bloqueada para evitar exponer información de jugadoras. El ingreso real requiere una versión privada con autenticación y base de datos segura.')
-        elif uploads:
-            if st.button('Validar y guardar fuentes seleccionadas', type='primary', use_container_width=True):
-                new_players, new_daily, new_periodic, report = read_source_updates(uploads, players)
-                conflicts = (find_existing_conflicts(new_daily, daily, 'Registros diarios') +
-                             find_existing_conflicts(new_periodic, periodic, 'Evaluaciones'))
-                errors = report['errores'] + conflicts
-                if errors:
-                    st.error(f'No se guardó ninguna fuente. Se encontraron {len(errors)} incompatibilidades:')
-                    st.write(errors[:30])
-                    if len(errors) > 30:
-                        st.caption(f'Hay {len(errors) - 30} errores adicionales.')
-                else:
-                    try:
-                        summary = apply_source_updates(new_players, new_daily, new_periodic)
-                    except ValueError as exc:
-                        st.error(f'No se guardó el lote: {exc}')
-                    else:
-                        st.success(f'Actualización completada: {len(uploads)} fuente(s) recibida(s); '
-                                   f'{summary["filas_nuevas"]} registros nuevos; '
-                                   f'{summary["filas_complementadas"]} complementados; '
-                                   f'{summary["filas_sin_cambios"]} sin cambios. '
-                                   'Las fuentes no subidas no se modificaron.')
-                        st.session_state.pop('active_result', None)
-                        st.info('Los cambios aparecerán en el dashboard y el simulador al recargar la página.')
-                    if report['avisos']:
-                        st.caption(f'{len(report["avisos"])} avisos: {"; ".join(report["avisos"][:3])}')
-        else:
-            st.caption('No hay archivos seleccionados. No se realizará ninguna actualización.')
-    st.markdown('#### 2. Ejecutar simulación')
-    if not players:
-        st.info('Primero carga los registros ficticios desde la sección Inicio.')
+elif page=='Simulador':
+    st.markdown('''<div class="hero"><div class="eyebrow">Simulador · Próxima sesión</div>
+    <h1>Registra hoy. Proyecta la siguiente sesión.</h1>
+    <p>Ingresa una o varias jugadoras, completa sus datos actuales y obtén un resultado por cada registro.
+    Puedes trabajar directamente en la tabla o cargar un archivo Excel.</p></div>''',unsafe_allow_html=True)
+    section_l,section_r=st.columns([1.5,1],gap='large')
+    with section_l:
+        st.markdown('#### 1. Ingresar registros')
+        st.caption('Una fila = una jugadora en una fecha. Agrega tantas filas como necesites.')
+    with section_r:
+        fmt_one,fmt_ten=st.columns(2)
+        with fmt_one:
+            st.download_button('⬇ Excel · 1 fila',
+                 data=(TEMPLATES/'Plantilla_1_jugadora.xlsx').read_bytes(),
+                 file_name='Plantilla_1_jugadora.xlsx',use_container_width=True,
+                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        with fmt_ten:
+            st.download_button('⬇ Excel · 10 filas',
+                 data=(TEMPLATES/'Plantilla_10_jugadoras.xlsx').read_bytes(),
+                 file_name='Plantilla_10_jugadoras.xlsx',use_container_width=True,
+                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    st.caption('Esta página pública acepta únicamente datos de prueba y nombres ficticios.')
+    uploader=st.file_uploader('Cargar registros en Excel (opcional)',type=['xlsx'],
+                              help='Acepta las plantillas de 1 o 10 filas; puedes incluir más registros si necesitas.')
+    if uploader is not None:
+        content=uploader.getvalue()
+        digest=sha256(content).hexdigest()
+        if digest!=st.session_state.last_upload_hash:
+            try:
+                imported=read_uploaded_excel(content)
+                if imported.empty:raise ValueError('El Excel no contiene registros.')
+                update_editor(imported)
+                st.session_state.last_upload_hash=digest
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
     else:
-        ids = sorted(name_by_id, key=lambda p: name_by_id[p])
-        c1, c2 = st.columns(2)
-        with c1:
-            person = st.selectbox('Jugadora', ids, format_func=player_label, key='sim_player')
-        dates = sorted({r['Fecha'] for r in daily if r['jugadora_id'] == person}, reverse=True)
-        if not dates:
-            st.warning('No hay registros diarios de esta jugadora.')
-        else:
-            with c2:
-                day = st.selectbox('Fecha de referencia (t)', dates, key='sim_date')
-            snap = snapshot(person, day, daily, periodic)
-            daily_fields = SOURCE_FIELDS['WELLNESS'] + SOURCE_FIELDS['ENTRENAMIENTO'] + SOURCE_FIELDS['GPS']
-            filled = sum(snap['valores'].get(f) is not None for f in daily_fields)
-            summary_cols = st.columns(3)
-            summary_cols[0].metric('Variables diarias disponibles', f'{filled}/{len(daily_fields)}')
-            summary_cols[1].metric('Mediciones periódicas disponibles',
-                                   sum(snap['valores'].get(f) is not None for f in
-                                       SOURCE_FIELDS['CLINICA'] + SOURCE_FIELDS['NEUROMUSCULAR']))
-            summary_cols[2].metric('Datos de carga en 28 días',
-                                   f'{snap["ventanas"]["dias_con_carga_28d"]} días')
-            with st.expander('Revisar datos de origen, faltantes y ventanas temporales'):
-                st.dataframe(pd.DataFrame(snap['auditoria']), hide_index=True, use_container_width=True)
-                st.dataframe(pd.DataFrame([
-                    {'Ventana': f'{n} días',
-                     'Carga observada': snap['ventanas'][f'carga_observada_{n}d'],
-                     'Días con carga': snap['ventanas'][f'dias_con_carga_{n}d'],
-                     'Cobertura (%)': snap['ventanas'][f'cobertura_{n}d']}
-                    for n in (3, 7, 14, 28)]), hide_index=True, use_container_width=True)
-                st.caption('No se utilizan datos posteriores a la fecha de referencia; ninguna ausencia se convierte automáticamente en cero.')
-            if st.button('Ejecutar simulación t → t+1', type='primary', use_container_width=True):
-                today = {'jugadora_id': person, 'Fecha': day, **snap['valores']}
-                try:
-                    result = demo_predict(today, daily)
-                except ValueError as exc:
-                    st.session_state.pop('active_result', None)
-                    st.error(f'No es posible simular: {exc}')
-                else:
-                    st.session_state['active_result'] = {'player': person, 'day': day, 'result': result}
-            active = st.session_state.get('active_result')
-            if active and active['player'] == person and active['day'] == day:
-                result = active['result']
-                st.markdown('#### 3. Resultado de demostración')
-                x, y, z = st.columns(3)
-                x.metric('Bienestar ficticio (0–100)', result['bienestar_demo'])
-                y.metric('Fatiga ficticia', result['fatiga_demo'])
-                z.metric('Fecha objetivo (t+1)', result['fecha_objetivo'])
-                st.markdown('<div class="soft-note">⚠️ Resultado artificial, sin entrenamiento ni validación. No representa una estimación médica ni una recomendación de participación deportiva.</div>', unsafe_allow_html=True)
-                st.caption('Las mediciones históricas se preparan para el futuro modelo, pero la fórmula de simulación actual no las utiliza todas.')
-                actions = st.columns(2)
-                with actions[0]:
-                    if st.button('Guardar en registro', use_container_width=True):
-                        save_simulation(result, person)
-                        st.success('Simulación guardada en el registro de esta demostración.')
-                with actions[1]:
-                    row = result_to_row(result, person, name_by_id[person])
-                    st.download_button('⬇ Descargar resultado (Excel/CSV)',
-                                       data=export_csv([row]),
-                                       file_name=f'simulacion_dragonas_{day}.csv',
-                                       mime='text/csv', use_container_width=True)
-                with st.expander('Ver contribuciones de la fórmula de ejemplo'):
-                    st.dataframe(pd.DataFrame([
-                        {'Variable': k, 'Contribución ficticia': v}
-                        for k, v in result['detalle_arbitrario'].items()]),
-                        hide_index=True, use_container_width=True)
-            else:
-                st.caption('Selecciona la jugadora y fecha; después ejecuta la simulación para habilitar la descarga del resultado.')
+        st.session_state.last_upload_hash=None
 
-elif view == 'Registro de simulaciones':
+    c1,c2=st.columns([1,1],vertical_alignment='center')
+    with c1:
+        if st.button('＋ Preparar 10 jugadoras',use_container_width=True):
+            today=current
+            update_editor(pd.DataFrame([fresh_row(n,today) for n in available_players[:10]]))
+            st.rerun()
+    with c2:
+        if st.button('↺ Volver a una fila',use_container_width=True):
+            update_editor(pd.DataFrame([fresh_row()]))
+            st.rerun()
+    cfg={
+        COL['fecha']:st.column_config.TextColumn('Fecha (AAAA-MM-DD)',required=True,width='small'),
+        COL['prox']:st.column_config.TextColumn('Próxima sesión (AAAA-MM-DD)',width='small'),
+        COL['nombre']:st.column_config.SelectboxColumn('Jugadora',options=available_players,required=True,width='medium'),
+        COL['rpe']:st.column_config.NumberColumn('RPE',min_value=1,max_value=10,step=.5,format='%.1f'),
+        COL['minutes']:st.column_config.NumberColumn('Duración (min)',min_value=1,max_value=1440,step=1),
+        COL['load']:st.column_config.NumberColumn('Carga',min_value=0,step=1),
+    }
+    for name,opts in CAT_CODES.items():
+        cfg[name]=st.column_config.SelectboxColumn(name,options=list(opts),width='medium')
+    edited=st.data_editor(st.session_state.editor_seed,
+       key=f'editor_{st.session_state.editor_version}',num_rows='dynamic',
+       hide_index=True,use_container_width=True,column_config=cfg,
+       height=min(560,max(170,105+38*len(st.session_state.editor_seed))))
+    st.caption('Los campos no medidos se completan con la mediana (numéricos) o moda (categorías) del historial previo. Si la carga está vacía, puede calcularse mediante RPE × duración.')
+    if st.button('Predecir próxima sesión',type='primary',use_container_width=True):
+        try:
+            results=run_batch(edited)
+            st.success(f'{len(results)} proyección(es) generada(s) correctamente.')
+        except ValueError as exc:
+            st.error(str(exc))
+    if st.session_state.active_results:
+        results=pd.DataFrame(st.session_state.active_results)
+        st.markdown('#### 2. Resultados por jugadora')
+        quick=st.columns(3)
+        quick[0].metric('Registros procesados',len(results))
+        quick[1].metric('Bienestar previsto medio',f'{results["Bienestar previsto"].mean():.1f} / 100')
+        quick[2].metric('Fatiga alta',int((results['Fatiga prevista']=='ALTA').sum()))
+        st.dataframe(results,hide_index=True,use_container_width=True,
+            column_config={'Bienestar previsto':st.column_config.ProgressColumn('Bienestar previsto',min_value=0,max_value=100,format='%.1f')})
+        st.download_button('⬇ Descargar resultados en Excel',type='primary',
+            data=excel_bytes(results),
+            file_name=f'proyecciones_dragonas_{current}.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            use_container_width=True)
+    with st.expander('Plantillas adicionales por fuente'):
+        st.caption('GPS, Wellness y Carga, Biomecánicos y Laboratorio. No es necesario completar estas fuentes para probar la proyección diaria.')
+        source_download_buttons()
+    with st.expander('Cómo se calcula la proyección'):
+        st.write('Bienestar: regresión lineal múltiple usando fatiga reportada, sueño, estrés, dolor, hidratación, sensación, RPE y cargas actual e histórica de siete días. Fatiga: clasificación por puntuación.')
+        st.caption('Los coeficientes fueron estimados mediante mínimos cuadrados sobre registros sintéticos; aún no existe validación del modelo con datos del club.')
+
+elif page=='Registro de simulaciones':
     st.title('Registro de simulaciones')
-    st.caption('Historial de resultados ficticios guardados. No es un registro de predicciones validadas.')
-    if not sims:
-        st.info('Aún no hay simulaciones guardadas. Ejecuta y guarda una desde «Simulador».')
+    st.markdown('<p class="page-subtitle">Consulta y descarga las proyecciones generadas en esta sesión.</p>',unsafe_allow_html=True)
+    results=pd.DataFrame(st.session_state.register)
+    if results.empty:
+        st.info('Todavía no se han generado proyecciones. Registra una sesión en Simulador para comenzar.')
     else:
-        all_rows = saved_simulation_rows()
-        names = sorted({r['Jugadora'] for r in all_rows})
-        filter_a, filter_b = st.columns(2)
-        with filter_a:
-            selected = st.selectbox('Filtrar por jugadora', ['Todas', *names])
-        with filter_b:
-            fatigue = st.selectbox('Filtrar por fatiga', ['Todas', 'BAJA', 'MODERADA', 'ALTA'])
-        filtered = [r for r in all_rows if
-                    (selected == 'Todas' or r['Jugadora'] == selected) and
-                    (fatigue == 'Todas' or r['Fatiga DEMO'] == fatigue)]
-        st.metric('Simulaciones encontradas', len(filtered))
-        columns = ['Jugadora', 'Fecha de datos', 'Fecha objetivo',
-                   'Bienestar DEMO', 'Fatiga DEMO', 'Versión']
-        st.dataframe(pd.DataFrame(filtered).reindex(columns=columns),
-                     hide_index=True, use_container_width=True)
-        st.download_button('⬇ Descargar registro filtrado (Excel/CSV)',
-                           data=export_csv(filtered), file_name='registro_simulaciones_dragonas.csv',
-                           mime='text/csv', type='primary')
-        st.caption('Los registros de esta demo pueden perderse cuando el servidor gratuito se reinicia; no es almacenamiento permanente.')
+        names=sorted(results['Jugadora'].unique())
+        a,b=st.columns(2)
+        with a: selected=st.selectbox('Jugadora',['Todas',*names])
+        with b: level=st.selectbox('Fatiga',['Todas','BAJA','MODERADA','ALTA'])
+        filtered=results.copy()
+        if selected!='Todas':filtered=filtered[filtered['Jugadora']==selected]
+        if level!='Todas':filtered=filtered[filtered['Fatiga prevista']==level]
+        st.metric('Simulaciones mostradas',len(filtered))
+        st.dataframe(filtered.iloc[::-1],hide_index=True,use_container_width=True,height=460)
+        st.download_button('⬇ Descargar registro en Excel',
+            data=excel_bytes(filtered,'REGISTRO'),file_name='registro_de_proyecciones.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            use_container_width=True)
 
-st.divider()
-st.caption('Dragonas IDV/USFQ · Prototipo académico · Datos sintéticos · Simulador no entrenado · 2026')
+st.markdown('<div class="footnote">Entorno con jugadoras y mediciones sintéticas. Las estimaciones no están validadas para decisiones médicas o deportivas.</div>',unsafe_allow_html=True)

@@ -1,0 +1,36 @@
+{
+  "history_records": 2112,
+  "players": 24,
+  "gps": 1056,
+  "neuro": 240,
+  "lab": 96,
+  "intercept": 94.62191,
+  "coefficients": {
+    "fatiga_actual": -2.72673,
+    "sueno": -2.36435,
+    "estres": -1.34666,
+    "dolor": -1.81366,
+    "deshidratacion": -2.15445,
+    "sensacion": -2.04324,
+    "rpe": -0.65444,
+    "carga_centenas": -0.96736,
+    "carga_media_7d_centenas": -0.21985
+  },
+  "imputed": {
+    "Cómo te sientes previo al entrenamiento": 165,
+    "Estado de sueño": 153,
+    "Tipo de estrés": 134,
+    "Tipo de fatiga": 139,
+    "Dolor muscular": 153,
+    "Nivel de deshidratación": 135,
+    "RPE_diario": 159,
+    "Time_total(min)": 149,
+    "Load_total": 140,
+    "Distancia total (m)": 136
+  },
+  "assets": [
+    "/mnt/data/dragonas_final_v6_build/data/Dragonas_Datos_Ficticios_2026.xlsx",
+    "/mnt/data/dragonas_final_v6_build/plantillas/Plantilla_1_jugadora.xlsx",
+    "/mnt/data/dragonas_final_v6_build/plantillas/Plantilla_10_jugadoras.xlsx"
+  ]
+}
