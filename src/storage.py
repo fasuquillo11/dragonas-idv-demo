@@ -124,3 +124,56 @@ def reset_demo():
         c.execute('DELETE FROM diario')
         c.execute('DELETE FROM evaluaciones')
         c.execute('DELETE FROM jugadoras')
+
+
+def apply_source_updates(players, daily, periodic):
+    """Aplica un lote validado en UNA transacción o lo revierte completo.
+
+    Un dato ausente no borra el histórico. Un valor nuevo que contradice una
+    medición existente se rechaza (la corrección exige revisión específica).
+    """
+    counters = {'jugadoras_nuevas': 0, 'filas_nuevas': 0,
+                'filas_complementadas': 0, 'filas_sin_cambios': 0}
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as c:
+        for p in players:
+            old = c.execute('SELECT nombre FROM jugadoras WHERE jugadora_id=?',
+                            (p['jugadora_id'],)).fetchone()
+            if old is not None:
+                if old[0] != p['nombre']:
+                    raise ValueError(f"ID asignado a otro nombre: {p['jugadora_id']}")
+                continue
+            c.execute('INSERT INTO jugadoras VALUES (?,?,?)',
+                      (p['jugadora_id'], p['nombre'], p.get('posicion')))
+            counters['jugadoras_nuevas'] += 1
+        for table, rows in (('diario', daily), ('evaluaciones', periodic)):
+            for r in rows:
+                pid, day = r['jugadora_id'], r['Fecha']
+                if c.execute('SELECT 1 FROM jugadoras WHERE jugadora_id=?', (pid,)).fetchone() is None:
+                    raise ValueError(f'Jugadora no registrada: {pid}')
+                incoming = {k: v for k, v in r.items()
+                            if k not in ('jugadora_id', 'Fecha') and v is not None}
+                if not incoming:
+                    continue
+                old = c.execute(f'SELECT valores FROM {table} WHERE jugadora_id=? AND fecha=?',
+                                (pid, day)).fetchone()
+                if old is None:
+                    c.execute(f'INSERT INTO {table} VALUES (?,?,?,?)',
+                              (pid, day, json.dumps(incoming, ensure_ascii=False), now))
+                    counters['filas_nuevas'] += 1
+                    continue
+                obj = json.loads(old[0])
+                conflicts = [f for f, v in incoming.items()
+                             if obj.get(f) is not None and obj[f] != v]
+                if conflicts:
+                    raise ValueError(f"Valor histórico incompatible para {pid}, {day}: " +
+                                     ', '.join(conflicts[:3]))
+                changed = {k: v for k, v in incoming.items() if obj.get(k) is None}
+                if changed:
+                    obj.update(changed)
+                    c.execute(f'UPDATE {table} SET valores=?,actualizado=? WHERE jugadora_id=? AND fecha=?',
+                              (json.dumps(obj, ensure_ascii=False), now, pid, day))
+                    counters['filas_complementadas'] += 1
+                else:
+                    counters['filas_sin_cambios'] += 1
+    return counters
